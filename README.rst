@@ -129,8 +129,13 @@ Contributing
 Contributions are very welcome. Tests can be run with `tox`_, please ensure
 the coverage at least stays the same before you submit a pull request.
 
-Performance benchmarks live in ``benchmarks/``. To capture a local baseline
-against the installed pytest version, run::
+Performance benchmarks live in ``benchmarks/`` and are included in source
+distributions as source-checkout tooling. They are not installed as console
+scripts and are intended for local development/CI artifact comparisons. The CLI
+benchmark isolates this plugin by disabling third-party plugin autoload and
+clearing pytest environment addopts, so it is a clean synthetic baseline rather
+than a plugin-heavy integration benchmark. To capture a local baseline against
+the installed pytest version, run::
 
     $ make benchmark
 

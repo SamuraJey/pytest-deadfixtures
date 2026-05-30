@@ -23,11 +23,11 @@ from typing import Any
 
 from deadfixtures_workload import DEFAULT_WORKLOADS, WORKLOADS, Workload, get_workload
 from pytest_deadfixtures import (
+    build_dead_fixture_analysis,
     deadfixtures_ignore,
     get_fixtures,
     get_parametrized_fixtures,
     get_used_fixturesdefs,
-    is_ignored_fixture,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -101,7 +101,7 @@ def run_benchmarks(args: argparse.Namespace, workloads: list[Workload]) -> dict[
     for workload in workloads:
         session = build_fake_session(workload)
         for _ in range(args.warmups):
-            analyze_dead_fixtures(session)
+            measure_dead_fixture_analysis(session)
 
         measurements = []
         for round_index in range(args.rounds):
@@ -206,13 +206,13 @@ def measure_algorithm(
     round_index: int,
 ) -> dict[str, Any]:
     started = time.perf_counter()
-    result = analyze_dead_fixtures(session)
+    result = measure_dead_fixture_analysis(session)
     seconds = time.perf_counter() - started
     assert_expected_result(workload, result["unused_fixture_names"])
     return {"round": round_index + 1, "seconds": seconds, **result}
 
 
-def analyze_dead_fixtures(session: FakeSession) -> dict[str, Any]:
+def measure_dead_fixture_analysis(session: FakeSession) -> dict[str, Any]:
     phases: dict[str, float] = {}
 
     started = time.perf_counter()
@@ -228,28 +228,19 @@ def analyze_dead_fixtures(session: FakeSession) -> dict[str, Any]:
     phases["get_parametrized_fixtures"] = time.perf_counter() - started
 
     started = time.perf_counter()
-    used_fixturedefs = set(used_fixtures)
-    param_fixturedefs = set(param_fixtures)
-    ignored_fixturedefs = {
-        fixture.fixturedef
-        for fixture in available_fixtures
-        if is_ignored_fixture(fixture.fixturedef)
-    }
-    unused_fixtures = [
-        fixture
-        for fixture in available_fixtures
-        if fixture.fixturedef not in used_fixturedefs
-        and fixture.fixturedef not in param_fixturedefs
-        and fixture.fixturedef not in ignored_fixturedefs
-    ]
+    analysis = build_dead_fixture_analysis(
+        used_fixtures, available_fixtures, param_fixtures
+    )
     phases["filter_unused_fixtures"] = time.perf_counter() - started
 
     return {
         "available_fixture_count": len(available_fixtures),
         "used_fixture_reference_count": len(used_fixtures),
         "parametrized_fixture_count": len(param_fixtures),
-        "unused_fixture_count": len(unused_fixtures),
-        "unused_fixture_names": sorted(fixture.argname for fixture in unused_fixtures),
+        "unused_fixture_count": len(analysis.unused_fixtures),
+        "unused_fixture_names": sorted(
+            fixture.argname for fixture in analysis.unused_fixtures
+        ),
         "phase_seconds": phases,
     }
 

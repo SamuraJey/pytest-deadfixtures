@@ -10,6 +10,25 @@ This directory contains two different benchmark styles:
 Use the algorithm benchmark when optimizing `pytest_deadfixtures.py` internals.
 Use CLI benchmarks or `hyperfine` when comparing end-user command latency.
 
+## Scope and Isolation
+
+These scripts are source-checkout tooling. They are included in source
+distributions for contributors and CI jobs, but they are not installed as
+console commands or treated as part of the runtime plugin API.
+
+The CLI runner intentionally creates clean synthetic baselines:
+
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` disables unrelated third-party pytest
+  plugins.
+- `PYTEST_ADDOPTS` and `PYTEST_PLUGINS` are removed from the benchmark
+  subprocess environment.
+- `-p no:cacheprovider` disables pytest cache effects.
+
+This makes branch-to-branch plugin comparisons more stable, but it is not a
+plugin-heavy integration benchmark. If you need integration evidence, run an
+additional command against the target project with its normal pytest
+configuration.
+
 The workloads model suites with shared `conftest.py` fixtures, per-module
 fixtures, fixture dependency chains, dead fixtures, autouse fixtures, ignored
 fixtures, and dynamic fixture lookups through parametrization. Project

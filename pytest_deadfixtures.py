@@ -3,6 +3,8 @@ Some functions are basically copy n' paste version of code already in pytest.
 Precisely the get_fixtures, get_used_fixturesdefs and write_docstring functions.
 """
 
+import os
+import shlex
 import sys
 from collections import namedtuple
 from itertools import combinations
@@ -27,6 +29,14 @@ EXIT_CODE_SUCCESS = 0
 AvailableFixture = namedtuple("AvailableFixture", "relpath, argname, fixturedef")
 
 CachedFixture = namedtuple("CachedFixture", "fixturedef, relpath, result")
+
+DeadFixtureAnalysis = namedtuple(
+    "DeadFixtureAnalysis",
+    (
+        "used_fixtures, available_fixtures, parametrized_fixtures, "
+        "ignored_fixtures, unused_fixtures"
+    ),
+)
 
 
 def pytest_addoption(parser):
@@ -72,7 +82,7 @@ def disable_assertion_rewriting(config):
     bytecode writes are disabled in benchmarks. If the user explicitly chose an
     assertion mode, respect that choice.
     """
-    if has_explicit_assert_mode(config.invocation_params.args):
+    if has_explicit_assert_mode(config):
         return
 
     config.option.assertmode = "plain"
@@ -92,7 +102,22 @@ def disable_assertion_rewriting(config):
     assertstate.mode = "plain"
 
 
-def has_explicit_assert_mode(args):
+def has_explicit_assert_mode(config):
+    if has_assert_mode_arg(config.invocation_params.args):
+        return True
+
+    env_addopts = os.environ.get("PYTEST_ADDOPTS")
+    if env_addopts and has_assert_mode_arg(shlex.split(env_addopts)):
+        return True
+
+    try:
+        addopts = config.getini("addopts")
+    except ValueError:
+        addopts = ()
+    return has_assert_mode_arg(addopts)
+
+
+def has_assert_mode_arg(args):
     args = list(args)
     for index, arg in enumerate(args):
         if arg.startswith("--assert="):
@@ -196,6 +221,49 @@ def get_parametrized_fixtures(session, available_fixtures):
     ]
 
 
+def analyze_dead_fixtures(session):
+    used_fixtures = get_used_fixturesdefs(session)
+    available_fixtures = get_fixtures(session)
+    param_fixtures = get_parametrized_fixtures(session, available_fixtures)
+    return build_dead_fixture_analysis(
+        used_fixtures, available_fixtures, param_fixtures
+    )
+
+
+def build_dead_fixture_analysis(
+    used_fixtures, available_fixtures, parametrized_fixtures
+):
+    used_fixturedefs = set(used_fixtures)
+    parametrized_fixturedefs = set(parametrized_fixtures)
+    ignored_fixturedefs = {
+        fixture.fixturedef
+        for fixture in available_fixtures
+        if is_ignored_fixture(fixture.fixturedef)
+    }
+
+    ignored_fixtures = [
+        fixture
+        for fixture in available_fixtures
+        if fixture.fixturedef in ignored_fixturedefs
+    ]
+
+    unused_fixtures = [
+        fixture
+        for fixture in available_fixtures
+        if fixture.fixturedef not in used_fixturedefs
+        and fixture.fixturedef not in parametrized_fixturedefs
+        and fixture.fixturedef not in ignored_fixturedefs
+    ]
+
+    return DeadFixtureAnalysis(
+        used_fixtures,
+        available_fixtures,
+        parametrized_fixtures,
+        ignored_fixtures,
+        unused_fixtures,
+    )
+
+
 def write_docstring(tw, doc):
     INDENT = "    "
     doc = doc.rstrip()
@@ -278,47 +346,27 @@ def show_dead_fixtures(config, session):
     show_fixture_doc = config.getvalue("show_fixture_doc")
     show_ignored = config.getvalue("show_ignored_fixtures")
 
-    used_fixtures = get_used_fixturesdefs(session)
-    available_fixtures = get_fixtures(session)
-    param_fixtures = get_parametrized_fixtures(session, available_fixtures)
-    used_fixturedefs = set(used_fixtures)
-    param_fixturedefs = set(param_fixtures)
-    ignored_fixturedefs = {
-        fixture.fixturedef
-        for fixture in available_fixtures
-        if is_ignored_fixture(fixture.fixturedef)
-    }
-
-    # Separate ignored and unused fixtures
-    ignored_fixtures = [
-        fixture
-        for fixture in available_fixtures
-        if fixture.fixturedef in ignored_fixturedefs
-    ]
-
-    unused_fixtures = [
-        fixture
-        for fixture in available_fixtures
-        if fixture.fixturedef not in used_fixturedefs
-        and fixture.fixturedef not in param_fixturedefs
-        and fixture.fixturedef not in ignored_fixturedefs
-    ]
+    analysis = analyze_dead_fixtures(session)
 
     tw.line()
-    if unused_fixtures:
+    if analysis.unused_fixtures:
         tw.line(
-            UNUSED_FIXTURES_FOUND_HEADLINE.format(count=len(unused_fixtures)), red=True
+            UNUSED_FIXTURES_FOUND_HEADLINE.format(
+                count=len(analysis.unused_fixtures)
+            ),
+            red=True,
         )
-        write_fixtures(tw, unused_fixtures, show_fixture_doc)
+        write_fixtures(tw, analysis.unused_fixtures, show_fixture_doc)
     else:
         tw.line(UNUSED_FIXTURES_NOT_FOUND_HEADLINE, green=True)
 
     # Show ignored fixtures if requested
-    if show_ignored and ignored_fixtures:
+    if show_ignored and analysis.ignored_fixtures:
         tw.line()
         tw.line(
-            IGNORED_FIXTURES_HEADLINE.format(count=len(ignored_fixtures)), yellow=True
+            IGNORED_FIXTURES_HEADLINE.format(count=len(analysis.ignored_fixtures)),
+            yellow=True,
         )
-        write_fixtures(tw, ignored_fixtures, show_fixture_doc)
+        write_fixtures(tw, analysis.ignored_fixtures, show_fixture_doc)
 
-    return unused_fixtures
+    return analysis.unused_fixtures
