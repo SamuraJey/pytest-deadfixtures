@@ -1,6 +1,12 @@
 Changelog
 ---------
 
+Unreleased
+~~~~~~~~~~
+
+* Improve ``--dead-fixtures`` performance on large suites while preserving
+  fixture reporting semantics and output format.
+
 3.1.0
 ~~~~~
 

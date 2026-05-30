@@ -12,6 +12,15 @@ test:
 	pip install .
 	pytest
 
+benchmark:
+	python benchmarks/run_deadfixtures_benchmark.py --case medium --rounds 5 --output .benchmarks/results/current-medium.json
+
+benchmark-algorithm:
+	python benchmarks/run_deadfixtures_algorithm_benchmark.py --case medium --rounds 50 --output .benchmarks/results/current-medium-algorithm.json
+
+benchmark-matrix:
+	python benchmarks/run_pytest_matrix.py --case medium --rounds 5
+
 test-release: clear
 	python setup.py sdist bdist_wheel
 	twine upload dist/* -r testpypi

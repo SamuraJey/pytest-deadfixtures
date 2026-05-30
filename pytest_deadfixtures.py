@@ -3,12 +3,13 @@ Some functions are basically copy n' paste version of code already in pytest.
 Precisely the get_fixtures, get_used_fixturesdefs and write_docstring functions.
 """
 
+import sys
 from collections import namedtuple
 from itertools import combinations
+from pathlib import Path
 from textwrap import dedent
 
 import _pytest.config
-import py
 from _pytest.compat import getlocation
 
 DUPLICATE_FIXTURES_HEADLINE = "\n\nYou may have some duplicate fixtures:"
@@ -54,11 +55,51 @@ def pytest_addoption(parser):
 
 def pytest_cmdline_main(config):
     if config.option.deadfixtures:
+        disable_assertion_rewriting(config)
         config.option.show_fixture_doc = config.option.verbose
         config.option.verbose = -1
         if _show_dead_fixtures(config):
             return EXIT_CODE_ERROR
         return EXIT_CODE_SUCCESS
+
+
+def disable_assertion_rewriting(config):
+    """Disable assertion rewriting for dead-fixture collection.
+
+    The plugin only needs pytest to import modules and build fixture metadata;
+    tests are not executed in ``--dead-fixtures`` mode. Pytest's assertion
+    rewriting can dominate collection time for large suites, especially when
+    bytecode writes are disabled in benchmarks. If the user explicitly chose an
+    assertion mode, respect that choice.
+    """
+    if has_explicit_assert_mode(config.invocation_params.args):
+        return
+
+    config.option.assertmode = "plain"
+    try:
+        from _pytest.assertion.rewrite import assertstate_key
+    except ImportError:
+        return
+
+    assertstate = config.stash.get(assertstate_key, None)
+    hook = getattr(assertstate, "hook", None)
+    if hook is None:
+        return
+
+    if hook in sys.meta_path:
+        sys.meta_path.remove(hook)
+    assertstate.hook = None
+    assertstate.mode = "plain"
+
+
+def has_explicit_assert_mode(args):
+    args = list(args)
+    for index, arg in enumerate(args):
+        if arg.startswith("--assert="):
+            return True
+        if arg == "--assert" and index + 1 < len(args):
+            return True
+    return False
 
 
 def _show_dead_fixtures(config):
@@ -68,8 +109,7 @@ def _show_dead_fixtures(config):
 
 
 def get_best_relpath(func, curdir):
-    loc = getlocation(func, curdir)
-    return curdir.bestrelpath(loc)
+    return getlocation(func, curdir)
 
 
 def deadfixtures_ignore(func):
@@ -87,33 +127,29 @@ def get_fixtures(session):
     available = []
     seen = set()
     fm = session._fixturemanager
-    curdir = py.path.local()
+    curdir = Path.cwd()
 
     for fixturedefs in fm._arg2fixturedefs.values():
         assert fixturedefs is not None
         if not fixturedefs:
             continue
         for fixturedef in fixturedefs:
+            module = fixturedef.func.__module__
+            if module.startswith("_pytest.") or module.startswith("pytest_"):
+                continue
+
             loc = getlocation(fixturedef.func, curdir)
             if (fixturedef.argname, loc) in seen:
                 continue
 
             seen.add((fixturedef.argname, loc))
 
-            module = fixturedef.func.__module__
-
             if (
-                not module.startswith("_pytest.")
-                and not module.startswith("pytest_")
-                and "site-packages" not in loc
+                "site-packages" not in loc
                 and "dist-packages" not in loc
                 and "<string>" not in loc
             ):
-                available.append(
-                    AvailableFixture(
-                        curdir.bestrelpath(loc), fixturedef.argname, fixturedef
-                    )
-                )
+                available.append(AvailableFixture(loc, fixturedef.argname, fixturedef))
 
     available.sort(key=lambda a: a.relpath)
     return available
@@ -139,17 +175,23 @@ def get_used_fixturesdefs(session):
 
 
 def get_parametrized_fixtures(session, available_fixtures):
-    params_values = []
+    params_values = set()
+    unhashable_params_values = []
     for test_function in session.items:
         try:
             for v in test_function.callspec.params.values():
-                params_values.append(v)
+                try:
+                    params_values.add(v)
+                except TypeError:
+                    unhashable_params_values.append(v)
         except AttributeError:
             continue
     return [
         available.fixturedef
         for available in filter(
-            lambda x: x.fixturedef.argname in params_values, available_fixtures
+            lambda x: x.fixturedef.argname in params_values
+            or x.fixturedef.argname in unhashable_params_values,
+            available_fixtures,
         )
     ]
 
@@ -184,13 +226,11 @@ cached_fixtures = []
 
 def pytest_fixture_post_finalizer(fixturedef):
     if getattr(fixturedef, "cached_result", None):
-        curdir = py.path.local()
+        curdir = Path.cwd()
         loc = getlocation(fixturedef.func, curdir)
 
         cached_fixtures.append(
-            CachedFixture(
-                fixturedef, curdir.bestrelpath(loc), fixturedef.cached_result[0]
-            )
+            CachedFixture(fixturedef, loc, fixturedef.cached_result[0])
         )
 
 
@@ -241,20 +281,27 @@ def show_dead_fixtures(config, session):
     used_fixtures = get_used_fixturesdefs(session)
     available_fixtures = get_fixtures(session)
     param_fixtures = get_parametrized_fixtures(session, available_fixtures)
+    used_fixturedefs = set(used_fixtures)
+    param_fixturedefs = set(param_fixtures)
+    ignored_fixturedefs = {
+        fixture.fixturedef
+        for fixture in available_fixtures
+        if is_ignored_fixture(fixture.fixturedef)
+    }
 
     # Separate ignored and unused fixtures
     ignored_fixtures = [
         fixture
         for fixture in available_fixtures
-        if is_ignored_fixture(fixture.fixturedef)
+        if fixture.fixturedef in ignored_fixturedefs
     ]
 
     unused_fixtures = [
         fixture
         for fixture in available_fixtures
-        if fixture.fixturedef not in used_fixtures
-        and fixture.fixturedef not in param_fixtures
-        and not is_ignored_fixture(fixture.fixturedef)
+        if fixture.fixturedef not in used_fixturedefs
+        and fixture.fixturedef not in param_fixturedefs
+        and fixture.fixturedef not in ignored_fixturedefs
     ]
 
     tw.line()

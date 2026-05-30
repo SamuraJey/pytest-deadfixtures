@@ -129,6 +129,16 @@ Contributing
 Contributions are very welcome. Tests can be run with `tox`_, please ensure
 the coverage at least stays the same before you submit a pull request.
 
+Performance benchmarks live in ``benchmarks/``. To capture a local baseline
+against the installed pytest version, run::
+
+    $ make benchmark
+
+To compare across supported pytest releases from 7.4.4 through the latest
+verified release, run::
+
+    $ make benchmark-matrix
+
 License
 -------
 
