@@ -1,11 +1,27 @@
+from pathlib import Path
+from textwrap import dedent
+from types import SimpleNamespace
+
 import pytest
 
 from pytest_deadfixtures import (
+    AvailableFixture,
+    CachedFixture,
     DUPLICATE_FIXTURES_HEADLINE,
     EXIT_CODE_ERROR,
     EXIT_CODE_SUCCESS,
     UNUSED_FIXTURES_FOUND_HEADLINE,
+    _find_duplicate_fixtures,
+    get_best_relpath,
+    get_parametrized_fixtures,
 )
+
+
+def pytester_path(pytester):
+    path = getattr(pytester, "path", None)
+    if path is not None:
+        return Path(path)
+    return Path(str(pytester.tmpdir))
 
 
 def test_error_exit_code_on_dead_fixtures_found(pytester):
@@ -74,6 +90,114 @@ def test_success_exit_code_on_parametrized_fixture_found(pytester):
     result = pytester.runpytest("--dead-fixtures")
 
     assert result.ret == EXIT_CODE_SUCCESS
+
+
+def test_parametrized_fixture_detection_preserves_list_membership_semantics():
+    class FixtureNameProxy:
+        def __eq__(self, other):
+            return other == "some_fixture"
+
+        def __hash__(self):
+            return 0
+
+    fixturedef = SimpleNamespace(argname="some_fixture")
+    session = SimpleNamespace(
+        items=[
+            SimpleNamespace(
+                callspec=SimpleNamespace(params={"fixture_name": FixtureNameProxy()})
+            )
+        ]
+    )
+    available_fixtures = [
+        AvailableFixture("tests/test_example.py:1", "some_fixture", fixturedef)
+    ]
+
+    assert get_parametrized_fixtures(session, available_fixtures) == [fixturedef]
+
+
+def make_assertmode_project(pytester):
+    pytester.makeconftest(
+        """
+        from pathlib import Path
+        import sys
+
+
+        def pytest_collection_finish(session):
+            from _pytest.assertion.rewrite import assertstate_key
+
+            assertstate = session.config.stash.get(assertstate_key, None)
+            hook = getattr(assertstate, "hook", None)
+            hook_active = hook is not None and hook in sys.meta_path
+            Path("assertmode.txt").write_text(
+                f"{session.config.option.assertmode}:{hook_active}"
+            )
+    """
+    )
+    pytester.makepyfile(
+        """
+        import pytest
+
+
+        @pytest.fixture()
+        def unused_fixture():
+            return 1
+
+
+        def test_simple():
+            assert True
+    """
+    )
+
+
+def read_assertmode(pytester):
+    return (pytester_path(pytester) / "assertmode.txt").read_text()
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    (
+        ((), "plain:False"),
+        (("--assert=plain",), "plain:False"),
+        (("--assert=rewrite",), "rewrite:True"),
+        (("--assert", "rewrite"), "rewrite:True"),
+    ),
+)
+def test_deadfixtures_assertion_mode_command_line_contract(
+    pytester, monkeypatch, args, expected
+):
+    monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
+    make_assertmode_project(pytester)
+
+    result = pytester.runpytest("--dead-fixtures", *args)
+
+    assert result.ret == EXIT_CODE_ERROR
+    assert read_assertmode(pytester) == expected
+
+
+def test_deadfixtures_assertion_mode_respects_env_addopts(pytester, monkeypatch):
+    monkeypatch.setenv("PYTEST_ADDOPTS", "--assert=rewrite")
+    make_assertmode_project(pytester)
+
+    result = pytester.runpytest("--dead-fixtures")
+
+    assert result.ret == EXIT_CODE_ERROR
+    assert read_assertmode(pytester) == "rewrite:True"
+
+
+def test_deadfixtures_assertion_mode_respects_ini_addopts(pytester, monkeypatch):
+    monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
+    pytester.makeini(
+        """
+        [pytest]
+        addopts = --assert=rewrite
+    """
+    )
+    make_assertmode_project(pytester)
+
+    result = pytester.runpytest("--dead-fixtures")
+
+    assert result.ret == EXIT_CODE_ERROR
+    assert read_assertmode(pytester) == "rewrite:True"
 
 
 def test_dont_list_autouse_fixture(pytester, message_template):
@@ -183,6 +307,63 @@ def test_list_same_file_multiple_unused_fixture(pytester, message_template):
     assert second in output
     assert output.index(first) < output.index(second)
     assert UNUSED_FIXTURES_FOUND_HEADLINE.format(count=2) in output
+
+
+def test_list_nested_unused_fixture_path_contract(pytester):
+    nested = Path(str(pytester.mkdir("nested")))
+    (nested / "test_nested_contract.py").write_text(
+        dedent(
+            """
+        import pytest
+
+
+        @pytest.fixture()
+        def nested_fixture():
+            return 1
+
+
+        def test_simple():
+            assert True
+    """
+        ),
+        encoding="utf-8",
+    )
+
+    result = pytester.runpytest("--dead-fixtures", "nested")
+    output = result.stdout.str().replace("\\", "/")
+
+    assert result.ret == EXIT_CODE_ERROR
+    assert (
+        "Fixture name: nested_fixture, "
+        "location: nested/test_nested_contract.py:"
+    ) in output
+
+
+def make_function_with_filename(filename):
+    namespace = {}
+    source = "def fixture_func():\n    return 1\n"
+    exec(compile(source, str(filename), "exec"), namespace)
+    return namespace["fixture_func"]
+
+
+def test_get_best_relpath_out_of_root_path_contract(tmp_path):
+    curdir = tmp_path / "repo"
+    curdir.mkdir()
+    outside = tmp_path / "outside" / "test_external.py"
+    func = make_function_with_filename(outside)
+
+    location = get_best_relpath(func, curdir)
+
+    assert location == f"{outside}:2"
+
+
+def test_get_best_relpath_preserves_windows_style_path_contract(tmp_path):
+    filename = r"C:\repo\tests\test_external.py"
+    func = make_function_with_filename(filename)
+
+    location = get_best_relpath(func, Path(tmp_path))
+
+    assert location == r"C:\repo\tests\test_external.py:2"
 
 
 def test_dont_list_conftest_fixture(pytester, message_template):
@@ -381,6 +562,45 @@ def test_repeated_fixtures_found(pytester):
 
     assert DUPLICATE_FIXTURES_HEADLINE in result.stdout.str()
     assert "someclass_samefixture" in result.stdout.str()
+
+
+def test_duplicate_fixture_analysis_preserves_pair_order_and_semantics():
+    class FixtureDef:
+        def __init__(self, argname):
+            self.argname = argname
+
+    class Box:
+        def __init__(self, value):
+            self.value = value
+
+    def cached(name, result, relpath=None):
+        return CachedFixture(
+            fixturedef=FixtureDef(name),
+            relpath=relpath or f"tests/{name}.py:1",
+            result=result,
+        )
+
+    fixtures = [
+        cached("list_a", [1, 2]),
+        cached("box_a", Box(1)),
+        cached("list_b", [1, 2]),
+        cached("box_b", Box(1)),
+        cached("box_same_location", Box(1), relpath="tests/box_a.py:1"),
+        cached("falsey_a", 0),
+        cached("falsey_b", 0),
+        cached("unique", 99),
+    ]
+
+    duplicate_pairs = _find_duplicate_fixtures(fixtures)
+
+    assert [
+        (left.fixturedef.argname, right.fixturedef.argname)
+        for left, right in duplicate_pairs
+    ] == [
+        ("list_a", "list_b"),
+        ("box_a", "box_b"),
+        ("box_b", "box_same_location"),
+    ]
 
 
 @pytest.mark.parametrize("directory", ("site-packages", "dist-packages", "<string>"))

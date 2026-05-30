@@ -3,5 +3,7 @@ include AUTHORS.rst
 include CHANGES.rst
 include README.rst
 
+recursive-include benchmarks *.py *.md *.txt
+
 recursive-exclude * __pycache__
 recursive-exclude * *.py[co]
