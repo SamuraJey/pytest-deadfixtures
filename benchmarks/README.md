@@ -1,11 +1,13 @@
 # Dead Fixtures Performance Benchmarks
 
-This directory contains two different benchmark styles:
+This directory contains three benchmark styles:
 
-1. **Algorithm-only benchmark**: measures just the dead-fixture analysis logic in
-   Python, after imports/setup/collection are already done.
+1. **Dead-fixture algorithm-only benchmark**: measures just the dead-fixture
+   analysis logic in Python, after imports/setup/collection are already done.
 2. **CLI benchmark**: measures the real command-line path,
    `python -m pytest -p pytest_deadfixtures --dead-fixtures`.
+3. **Duplicate-fixture algorithm-only benchmark**: measures just the duplicate
+   cached-fixture comparison logic used by `--dup-fixtures`.
 
 Use the algorithm benchmark when optimizing `pytest_deadfixtures.py` internals.
 Use CLI benchmarks or `hyperfine` when comparing end-user command latency.
@@ -69,6 +71,24 @@ python benchmarks/run_deadfixtures_algorithm_benchmark.py \
 ```
 
 The JSON contains total timing plus per-phase timing in `phase_stats`.
+
+## Duplicate-Fixture Algorithm Baseline
+
+`run_dupfixtures_algorithm_benchmark.py` builds in-memory cached fixture results
+and times the production duplicate-fixture helper used by `--dup-fixtures`.
+It excludes Python process startup, imports, pytest CLI bootstrap, test
+execution, and terminal output rendering.
+
+```bash
+python benchmarks/run_dupfixtures_algorithm_benchmark.py \
+  --case large \
+  --rounds 20 \
+  --warmups 3 \
+  --output .benchmarks/results/dup-large-algorithm.json
+```
+
+Each round asserts the exact expected duplicate fixture pairs, so semantic
+regressions are visible alongside timing regressions.
 
 ## Python CLI Baseline
 

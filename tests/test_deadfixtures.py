@@ -4,10 +4,12 @@ from textwrap import dedent
 import pytest
 
 from pytest_deadfixtures import (
+    CachedFixture,
     DUPLICATE_FIXTURES_HEADLINE,
     EXIT_CODE_ERROR,
     EXIT_CODE_SUCCESS,
     UNUSED_FIXTURES_FOUND_HEADLINE,
+    _find_duplicate_fixtures,
     get_best_relpath,
 )
 
@@ -534,6 +536,45 @@ def test_repeated_fixtures_found(pytester):
 
     assert DUPLICATE_FIXTURES_HEADLINE in result.stdout.str()
     assert "someclass_samefixture" in result.stdout.str()
+
+
+def test_duplicate_fixture_analysis_preserves_pair_order_and_semantics():
+    class FixtureDef:
+        def __init__(self, argname):
+            self.argname = argname
+
+    class Box:
+        def __init__(self, value):
+            self.value = value
+
+    def cached(name, result, relpath=None):
+        return CachedFixture(
+            fixturedef=FixtureDef(name),
+            relpath=relpath or f"tests/{name}.py:1",
+            result=result,
+        )
+
+    fixtures = [
+        cached("list_a", [1, 2]),
+        cached("box_a", Box(1)),
+        cached("list_b", [1, 2]),
+        cached("box_b", Box(1)),
+        cached("box_same_location", Box(1), relpath="tests/box_a.py:1"),
+        cached("falsey_a", 0),
+        cached("falsey_b", 0),
+        cached("unique", 99),
+    ]
+
+    duplicate_pairs = _find_duplicate_fixtures(fixtures)
+
+    assert [
+        (left.fixturedef.argname, right.fixturedef.argname)
+        for left, right in duplicate_pairs
+    ] == [
+        ("list_a", "list_b"),
+        ("box_a", "box_b"),
+        ("box_b", "box_same_location"),
+    ]
 
 
 @pytest.mark.parametrize("directory", ("site-packages", "dist-packages", "<string>"))

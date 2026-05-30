@@ -12,7 +12,7 @@ from pathlib import Path
 from textwrap import dedent
 
 import _pytest.config
-from _pytest.compat import getlocation
+from _pytest.compat import get_real_func
 
 DUPLICATE_FIXTURES_HEADLINE = "\n\nYou may have some duplicate fixtures:"
 UNUSED_FIXTURES_FOUND_HEADLINE = (
@@ -134,7 +134,43 @@ def _show_dead_fixtures(config):
 
 
 def get_best_relpath(func, curdir):
-    return getlocation(func, curdir)
+    return _get_fixture_location(func, curdir)
+
+
+def _get_fixture_location(func, curdir):
+    """Return pytest-style ``path:line`` for a fixture function.
+
+    This is a narrow, faster equivalent of ``_pytest.compat.getlocation`` for
+    Python functions. It avoids ``inspect.getfile`` and ``Path.relative_to`` on
+    the common in-project path, which is hot for large fixture suites.
+    """
+    real_func = get_real_func(func)
+    code = real_func.__code__
+    return _format_fixture_location(
+        code.co_filename,
+        code.co_firstlineno + 1,
+        curdir,
+    )
+
+
+def _format_fixture_location(filename, lineno, curdir):
+    if curdir is not None:
+        relpath = _relative_filename(filename, curdir)
+        if relpath is not None:
+            return f"{relpath}:{lineno}"
+    return f"{filename}:{lineno}"
+
+
+def _relative_filename(filename, curdir):
+    curdir = os.fspath(curdir)
+    prefix = curdir + os.sep
+    if filename.startswith(prefix):
+        return filename[len(prefix) :]
+
+    try:
+        return str(Path(filename).relative_to(curdir))
+    except ValueError:
+        return None
 
 
 def deadfixtures_ignore(func):
@@ -163,7 +199,7 @@ def get_fixtures(session):
             if module.startswith("_pytest.") or module.startswith("pytest_"):
                 continue
 
-            loc = getlocation(fixturedef.func, curdir)
+            loc = _get_fixture_location(fixturedef.func, curdir)
             if (fixturedef.argname, loc) in seen:
                 continue
 
@@ -192,7 +228,7 @@ def get_used_fixturesdefs(session):
             # this test item does not use any fixtures
             continue
 
-        for _, fixturedefs in sorted(info.name2fixturedefs.items()):
+        for fixturedefs in info.name2fixturedefs.values():
             if fixturedefs is None:
                 continue
             fixturesdefs.append(fixturedefs[-1])
@@ -291,33 +327,124 @@ def write_fixtures(tw, fixtures, write_docs):
 
 cached_fixtures = []
 
+_NO_DUPLICATE_RESULT = object()
+_UNHASHABLE_DUPLICATE_RESULT = object()
+
 
 def pytest_fixture_post_finalizer(fixturedef):
     if getattr(fixturedef, "cached_result", None):
         curdir = Path.cwd()
-        loc = getlocation(fixturedef.func, curdir)
+        loc = _get_fixture_location(fixturedef.func, curdir)
 
         cached_fixtures.append(
             CachedFixture(fixturedef, loc, fixturedef.cached_result[0])
         )
 
 
+def _result_same_type(a, b):
+    return isinstance(a.result, type(b.result))
+
+
+def _same_result(a, b):
+    if not a.result or not b.result:
+        return False
+    if hasattr(a.result, "__dict__") or hasattr(b.result, "__dict__"):
+        return a.result.__dict__ == b.result.__dict__
+    return a.result == b.result
+
+
+def _same_loc(a, b):
+    return a.relpath == b.relpath
+
+
 def same_fixture(one, two):
-    def result_same_type(a, b):
-        return isinstance(a.result, type(b.result))
-
-    def same_result(a, b):
-        if not a.result or not b.result:
-            return False
-        if hasattr(a.result, "__dict__") or hasattr(b.result, "__dict__"):
-            return a.result.__dict__ == b.result.__dict__
-        return a.result == b.result
-
-    def same_loc(a, b):
-        return a.relpath == b.relpath
-
     return (
-        result_same_type(one, two) and same_result(one, two) and not same_loc(one, two)
+        _result_same_type(one, two)
+        and _same_result(one, two)
+        and not _same_loc(one, two)
+    )
+
+
+def _find_duplicate_fixtures(fixtures):
+    fixtures = list(fixtures)
+    fixture_indices = {id(fixture): index for index, fixture in enumerate(fixtures)}
+    hashable_groups = {}
+    unhashable_groups = []
+
+    for fixture in fixtures:
+        key = _duplicate_result_key(fixture.result)
+        if key is _NO_DUPLICATE_RESULT:
+            continue
+        if key is _UNHASHABLE_DUPLICATE_RESULT:
+            _add_to_unhashable_duplicate_group(unhashable_groups, fixture)
+            continue
+        hashable_groups.setdefault(key, []).append(fixture)
+
+    duplicated_fixtures = []
+    for group in hashable_groups.values():
+        _add_duplicate_pairs(duplicated_fixtures, group)
+    for group in unhashable_groups:
+        _add_duplicate_pairs(duplicated_fixtures, group)
+
+    duplicated_fixtures.sort(
+        key=lambda pair: (fixture_indices[id(pair[0])], fixture_indices[id(pair[1])])
+    )
+    return duplicated_fixtures
+
+
+def _duplicate_result_key(result):
+    if not result:
+        return _NO_DUPLICATE_RESULT
+
+    if hasattr(result, "__dict__"):
+        try:
+            return ("dict", _freeze_hashable(result.__dict__))
+        except TypeError:
+            return _UNHASHABLE_DUPLICATE_RESULT
+
+    try:
+        hash(result)
+    except TypeError:
+        return _UNHASHABLE_DUPLICATE_RESULT
+    return ("value", result)
+
+
+def _freeze_hashable(value):
+    if isinstance(value, dict):
+        return frozenset(
+            (_freeze_hashable(key), _freeze_hashable(item))
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_hashable(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze_hashable(item) for item in value)
+    hash(value)
+    return value
+
+
+def _add_to_unhashable_duplicate_group(groups, fixture):
+    for group in groups:
+        if _same_duplicate_result(fixture, group[0]):
+            group.append(fixture)
+            return
+    groups.append([fixture])
+
+
+def _same_duplicate_result(one, two):
+    try:
+        return _same_result(one, two)
+    except AttributeError:
+        return False
+
+
+def _add_duplicate_pairs(duplicated_fixtures, fixtures):
+    if len(fixtures) < 2:
+        return
+    duplicated_fixtures.extend(
+        (a, b)
+        for a, b in combinations(fixtures, 2)
+        if same_fixture(a, b)
     )
 
 
@@ -327,10 +454,7 @@ def pytest_sessionfinish(session, exitstatus):
 
     tw = _pytest.config.create_terminal_writer(session.config)
 
-    duplicated_fixtures = []
-    for a, b in combinations(cached_fixtures, 2):
-        if same_fixture(a, b):
-            duplicated_fixtures.append((a, b))
+    duplicated_fixtures = _find_duplicate_fixtures(cached_fixtures)
 
     if duplicated_fixtures:
         tw.line(DUPLICATE_FIXTURES_HEADLINE, red=True)
