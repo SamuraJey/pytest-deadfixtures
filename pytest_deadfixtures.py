@@ -236,22 +236,22 @@ def get_used_fixturesdefs(session):
 
 
 def get_parametrized_fixtures(session, available_fixtures):
-    params_values = set()
-    unhashable_params_values = []
+    fixture_name_params = set()
+    non_string_params = []
     for test_function in session.items:
         try:
             for v in test_function.callspec.params.values():
-                try:
-                    params_values.add(v)
-                except TypeError:
-                    unhashable_params_values.append(v)
+                if isinstance(v, str):
+                    fixture_name_params.add(v)
+                else:
+                    non_string_params.append(v)
         except AttributeError:
             continue
     return [
         available.fixturedef
         for available in filter(
-            lambda x: x.fixturedef.argname in params_values
-            or x.fixturedef.argname in unhashable_params_values,
+            lambda x: x.fixturedef.argname in fixture_name_params
+            or x.fixturedef.argname in non_string_params,
             available_fixtures,
         )
     ]

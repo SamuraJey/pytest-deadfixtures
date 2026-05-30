@@ -1,9 +1,11 @@
 from pathlib import Path
 from textwrap import dedent
+from types import SimpleNamespace
 
 import pytest
 
 from pytest_deadfixtures import (
+    AvailableFixture,
     CachedFixture,
     DUPLICATE_FIXTURES_HEADLINE,
     EXIT_CODE_ERROR,
@@ -11,6 +13,7 @@ from pytest_deadfixtures import (
     UNUSED_FIXTURES_FOUND_HEADLINE,
     _find_duplicate_fixtures,
     get_best_relpath,
+    get_parametrized_fixtures,
 )
 
 
@@ -87,6 +90,29 @@ def test_success_exit_code_on_parametrized_fixture_found(pytester):
     result = pytester.runpytest("--dead-fixtures")
 
     assert result.ret == EXIT_CODE_SUCCESS
+
+
+def test_parametrized_fixture_detection_preserves_list_membership_semantics():
+    class FixtureNameProxy:
+        def __eq__(self, other):
+            return other == "some_fixture"
+
+        def __hash__(self):
+            return 0
+
+    fixturedef = SimpleNamespace(argname="some_fixture")
+    session = SimpleNamespace(
+        items=[
+            SimpleNamespace(
+                callspec=SimpleNamespace(params={"fixture_name": FixtureNameProxy()})
+            )
+        ]
+    )
+    available_fixtures = [
+        AvailableFixture("tests/test_example.py:1", "some_fixture", fixturedef)
+    ]
+
+    assert get_parametrized_fixtures(session, available_fixtures) == [fixturedef]
 
 
 def make_assertmode_project(pytester):
